@@ -4,45 +4,34 @@ import { getPool }                    from '../db/conexion.js';
 import { enviarAlerta }               from './telegramService.js';
 
 // ── Estado en memoria ─────────────────────────────────────────────────────────
-const estadosNVR    = {}; // { ip: { enCaida: bool, numCaidas: number } }
-const estadosCamara = {}; // { ip: { enCaida: bool, nvrNombre: string } }
+const estadosNVR    = {}; // { ip: { enCaida, numCaidas, fallosConsecutivos } }
+const estadosCamara = {}; // { ip: { enCaida, nvrNombre, fallosConsecutivos } }
 
-let ultimoEstado        = null; // Cache del último chequeo para la API
-const eventosPendientes = [];   // Cola de eventos nuevos para SweetAlert en el frontend
+let ultimoEstado        = null;
+const eventosPendientes = [];
 
-// ── Inicializar estados en memoria ────────────────────────────────────────────
+// ── Inicializar estados ───────────────────────────────────────────────────────
 export function inicializarEstados() {
-  const todas = [...fisica, ...paciente, ...cx, ...ucis]; // Unir todas las secciones
-
+  const todas = [...fisica, ...paciente, ...cx, ...ucis];
   todas.forEach(nvr => {
-    estadosNVR[nvr.ip] = { enCaida: false, numCaidas: 0 }; // Estado inicial del NVR
+    estadosNVR[nvr.ip] = { enCaida: false, numCaidas: 0, fallosConsecutivos: 0 };
     nvr.camaras.forEach(cam => {
-      estadosCamara[cam.ip] = { enCaida: false, nvrNombre: nvr.nombre }; // Estado inicial cámara
+      estadosCamara[cam.ip] = { enCaida: false, nvrNombre: nvr.nombre, fallosConsecutivos: 0 };
     });
   });
 }
 
-// ── Sincronizar estados desde la BD al arrancar ───────────────────────────────
-// Evita registrar caídas duplicadas cuando el servidor se reinicia.
-// Consulta el último evento de cada dispositivo y si fue "caida",
-// lo marca como ya caído en memoria para no volver a registrarlo.
+// ── Sincronizar estados desde BD al arrancar ──────────────────────────────────
 export async function sincronizarEstadosDesdeDB() {
   try {
-    const pool = getPool(); // Obtener pool de conexiones
-
-    // Obtener el último evento registrado por cada IP
-    const [rows] = await pool.query(`
-      SELECT ip, tipo
-      FROM eventos e1
-      WHERE fecha = (
-        SELECT MAX(fecha) FROM eventos e2 WHERE e2.ip = e1.ip
-      )
+    const [rows] = await getPool().query(`
+      SELECT ip, tipo FROM eventos e1
+      WHERE fecha = (SELECT MAX(fecha) FROM eventos e2 WHERE e2.ip = e1.ip)
     `);
-
     rows.forEach(row => {
-      if (row.tipo === 'caida') {                          // Si el último evento fue una caída
-        if (estadosNVR[row.ip])    estadosNVR[row.ip].enCaida    = true; // Marcar NVR como caído
-        if (estadosCamara[row.ip]) estadosCamara[row.ip].enCaida = true; // Marcar cámara como caída
+      if (row.tipo === 'caida') {
+        if (estadosNVR[row.ip])    estadosNVR[row.ip].enCaida    = true;
+        if (estadosCamara[row.ip]) estadosCamara[row.ip].enCaida = true;
       }
     });
   } catch (err) {
@@ -57,18 +46,16 @@ async function verificarDispositivo(ip) {
     `http://${ip}/favicon.ico`,
     `http://${ip}/doc/page/login.asp`
   ];
-
   for (const url of urls) {
     try {
-      const ctrl = new AbortController();                // Controlador para cancelar la petición
-      const t    = setTimeout(() => ctrl.abort(), 3000); // Timeout de 3 segundos
-      await fetch(url, { signal: ctrl.signal });         // Intentar conexión HTTP
+      const ctrl = new AbortController();
+      const t    = setTimeout(() => ctrl.abort(), 4000);
+      await fetch(url, { signal: ctrl.signal });
       clearTimeout(t);
-      return true;  // Cualquier respuesta HTTP = dispositivo activo
-    } catch { /* Sin respuesta — probar siguiente URL */ }
+      return true;
+    } catch { }
   }
-
-  return false; // Ninguna URL respondió = dispositivo caído
+  return false;
 }
 
 // ── Guardar evento en MySQL ───────────────────────────────────────────────────
@@ -79,23 +66,26 @@ async function guardarEvento(nombre, ip, tipo, tipoDispositivo, nvrNombre = null
       [nombre, ip, tipo, tipoDispositivo, nvrNombre]
     );
   } catch (err) {
-    console.error('Error al guardar evento en BD:', err.message);
+    console.error('Error al guardar evento:', err.message);
   }
 }
 
-// ── Chequeo completo de todos los NVRs y cámaras ─────────────────────────────
+// ── Chequeo completo ──────────────────────────────────────────────────────────
 export async function chequearTodo() {
-  const secciones = { fisica, paciente, cx, ucis }; // Todas las secciones agrupadas
-  const resultado = {};                               // Resultado del chequeo
+  const secciones = { fisica, paciente, cx, ucis };
+  const resultado = {};
 
   await Promise.all(Object.entries(secciones).map(async ([key, lista]) => {
     resultado[key] = await Promise.all(lista.map(async nvr => {
+      const activo = await verificarDispositivo(nvr.ip);
+      const est    = estadosNVR[nvr.ip];
 
-      const activo = await verificarDispositivo(nvr.ip); // Verificar si el NVR responde
-      const est    = estadosNVR[nvr.ip];                  // Estado actual en memoria
+      // Acumular o resetear fallos consecutivos
+      if (!activo) { est.fallosConsecutivos++; }
+      else         { est.fallosConsecutivos = 0; }
 
-      // NVR activo -> caido
-      if (!activo && !est.enCaida) {
+      // Caída: solo al SEGUNDO fallo consecutivo (evita falsos positivos)
+      if (est.fallosConsecutivos === 2 && !est.enCaida) {
         est.enCaida = true;
         est.numCaidas++;
         const fecha = new Date().toLocaleString('es-CO');
@@ -104,7 +94,7 @@ export async function chequearTodo() {
         eventosPendientes.push({ tipo: 'caida', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip });
       }
 
-      // NVR caido -> recuperado
+      // Recuperación
       if (activo && est.enCaida) {
         est.enCaida = false;
         const fecha = new Date().toLocaleString('es-CO');
@@ -113,17 +103,18 @@ export async function chequearTodo() {
         eventosPendientes.push({ tipo: 'recuperacion', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip });
       }
 
-      // Chequear cámaras del NVR
+      // Cámaras
       const camaras = await Promise.all(nvr.camaras.map(async cam => {
-        const camActiva = await verificarDispositivo(cam.ip); // Verificar si la cámara responde
-
+        const camActiva = await verificarDispositivo(cam.ip);
         if (!estadosCamara[cam.ip]) {
-          estadosCamara[cam.ip] = { enCaida: false, nvrNombre: nvr.nombre };
+          estadosCamara[cam.ip] = { enCaida: false, nvrNombre: nvr.nombre, fallosConsecutivos: 0 };
         }
         const camEst = estadosCamara[cam.ip];
 
-        // Camara activa -> caida
-        if (!camActiva && !camEst.enCaida) {
+        if (!camActiva) { camEst.fallosConsecutivos++; }
+        else            { camEst.fallosConsecutivos = 0; }
+
+        if (camEst.fallosConsecutivos === 2 && !camEst.enCaida) {
           camEst.enCaida = true;
           const fecha = new Date().toLocaleString('es-CO');
           await guardarEvento(cam.nombre, cam.ip, 'caida', 'camara', nvr.nombre);
@@ -131,7 +122,6 @@ export async function chequearTodo() {
           eventosPendientes.push({ tipo: 'caida', tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre });
         }
 
-        // Camara caida -> recuperada
         if (camActiva && camEst.enCaida) {
           camEst.enCaida = false;
           const fecha = new Date().toLocaleString('es-CO');
@@ -147,15 +137,42 @@ export async function chequearTodo() {
     }));
   }));
 
-  ultimoEstado = resultado; // Actualizar cache con el nuevo resultado
+  ultimoEstado = resultado;
 }
 
-// ── Obtener historial desde MySQL ─────────────────────────────────────────────
-export async function obtenerHistorial() {
+// ── Historial con filtros ─────────────────────────────────────────────────────
+export async function obtenerHistorialFiltrado({ desde, hasta, ip, tipo, tipoDispositivo, hora, limite = 200 } = {}) {
   try {
-    const [rows] = await getPool().query(
-      'SELECT * FROM eventos ORDER BY fecha DESC LIMIT 50'
-    );
+    let query    = 'SELECT * FROM eventos WHERE 1=1';
+    const params = [];
+
+    // Filtro por rango de fechas (formato: "YYYY-MM-DD HH:MM:SS")
+    if (desde) { query += ' AND fecha >= ?'; params.push(desde); }
+    if (hasta) { query += ' AND fecha <= ?'; params.push(hasta); }
+
+    // Filtro por IP o nombre
+    if (ip) {
+      query += ' AND (ip LIKE ? OR nombre LIKE ?)';
+      params.push(`%${ip}%`, `%${ip}%`);
+    }
+
+    // Filtro por tipo de evento
+    if (tipo) { query += ' AND tipo = ?'; params.push(tipo); }
+
+    // Filtro por tipo de dispositivo
+    if (tipoDispositivo) { query += ' AND tipo_dispositivo = ?'; params.push(tipoDispositivo); }
+
+    // Filtro por hora del día (0-23) — muestra cualquier minuto de esa hora
+    // Ej: hora=9 → muestra eventos de 09:00 a 09:59
+    if (hora !== undefined && hora !== null && hora !== '') {
+      query += ' AND HOUR(fecha) = ?';
+      params.push(parseInt(hora));
+    }
+
+    query += ' ORDER BY fecha DESC LIMIT ?';
+    params.push(limite);
+
+    const [rows] = await getPool().query(query, params);
     return rows;
   } catch (err) {
     console.error('Error al obtener historial:', err.message);
@@ -167,7 +184,7 @@ export async function obtenerHistorial() {
 export function getUltimoEstado() { return ultimoEstado; }
 
 export function consumirEventosPendientes() {
-  const copia = [...eventosPendientes]; // Copiar eventos pendientes
-  eventosPendientes.length = 0;         // Limpiar la cola
-  return copia;                         // Retornar la copia al frontend
+  const copia = [...eventosPendientes];
+  eventosPendientes.length = 0;
+  return copia;
 }
