@@ -5,12 +5,16 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev":   "nodemon server.js"
+    "dev": "nodemon server.js",
+    "crear-admin": "node scripts/crearAdmin.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mysql2":  "^3.11.0",
-    "dotenv":  "^16.4.7"
+    "jsonwebtoken": "^9.0.3",
+    "mysql2": "^3.11.0",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

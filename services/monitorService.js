@@ -1,7 +1,8 @@
 // ── Servicio de monitoreo de NVRs y cámaras ──────────────────────────────────
 import { fisica, paciente, cx, ucis } from '../config/dispositivos.js';
 import { getPool }                    from '../db/conexion.js';
-import { enviarAlerta }               from './telegramService.js';
+import { enviarAlerta, reintentarPendientes } from './telegramService.js';
+import { getIO }                      from './socketService.js';
 
 // ── Estado en memoria ─────────────────────────────────────────────────────────
 const estadosNVR    = {}; // { ip: { enCaida, numCaidas, fallosConsecutivos } }
@@ -9,6 +10,13 @@ const estadosCamara = {}; // { ip: { enCaida, nvrNombre, fallosConsecutivos } }
 
 let ultimoEstado        = null;
 const eventosPendientes = [];
+
+// Umbral para decidir si un mensaje de Telegram va uno por uno (detalle
+// completo) o resumido en un solo mensaje (incidente masivo). Se evalúa por
+// separado para caídas y para recuperaciones, y por separado para NVRs y
+// cámaras: si CUALQUIERA de los dos (NVRs caídos o cámaras caídas) supera
+// este número en el mismo chequeo, se resume todo en un solo mensaje.
+const UMBRAL_TELEGRAM_MASIVO = 10;
 
 // ── Inicializar estados ───────────────────────────────────────────────────────
 export function inicializarEstados() {
@@ -72,8 +80,15 @@ async function guardarEvento(nombre, ip, tipo, tipoDispositivo, nvrNombre = null
 
 // ── Chequeo completo ──────────────────────────────────────────────────────────
 export async function chequearTodo() {
+  await reintentarPendientes(); // Primero, reintentar lo que quedó pendiente de Telegram
+
   const secciones = { fisica, paciente, cx, ucis };
   const resultado = {};
+
+  // Eventos detectados en ESTA vuelta de chequeo, agrupados para decidir cómo
+  // avisarlos por Telegram al final (uno por uno vs. resumen masivo).
+  const telegramCaidas       = [];
+  const telegramRecuperados  = [];
 
   await Promise.all(Object.entries(secciones).map(async ([key, lista]) => {
     resultado[key] = await Promise.all(lista.map(async nvr => {
@@ -90,8 +105,10 @@ export async function chequearTodo() {
         est.numCaidas++;
         const fecha = new Date().toLocaleString('es-CO');
         await guardarEvento(nvr.nombre, nvr.ip, 'caida', 'nvr');
-        await enviarAlerta(`NVR CAIDO\nNombre: ${nvr.nombre}\nIP: ${nvr.ip}\nFecha: ${fecha}`);
-        eventosPendientes.push({ tipo: 'caida', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip });
+        telegramCaidas.push({ tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip, fecha });
+        const evento = { tipo: 'caida', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip };
+        eventosPendientes.push(evento);
+        getIO()?.emit('evento', evento);
       }
 
       // Recuperación
@@ -99,8 +116,10 @@ export async function chequearTodo() {
         est.enCaida = false;
         const fecha = new Date().toLocaleString('es-CO');
         await guardarEvento(nvr.nombre, nvr.ip, 'recuperacion', 'nvr');
-        await enviarAlerta(`NVR RECUPERADO\nNombre: ${nvr.nombre}\nIP: ${nvr.ip}\nFecha: ${fecha}`);
-        eventosPendientes.push({ tipo: 'recuperacion', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip });
+        telegramRecuperados.push({ tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip, fecha });
+        const evento = { tipo: 'recuperacion', tipoDispositivo: 'nvr', nombre: nvr.nombre, ip: nvr.ip };
+        eventosPendientes.push(evento);
+        getIO()?.emit('evento', evento);
       }
 
       // Cámaras
@@ -118,16 +137,20 @@ export async function chequearTodo() {
           camEst.enCaida = true;
           const fecha = new Date().toLocaleString('es-CO');
           await guardarEvento(cam.nombre, cam.ip, 'caida', 'camara', nvr.nombre);
-          await enviarAlerta(`CAMARA CAIDA\nNombre: ${cam.nombre}\nIP: ${cam.ip}\nNVR: ${nvr.nombre}\nFecha: ${fecha}`);
-          eventosPendientes.push({ tipo: 'caida', tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre });
+          telegramCaidas.push({ tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre, fecha });
+          const evento = { tipo: 'caida', tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre };
+          eventosPendientes.push(evento);
+          getIO()?.emit('evento', evento);
         }
 
         if (camActiva && camEst.enCaida) {
           camEst.enCaida = false;
           const fecha = new Date().toLocaleString('es-CO');
           await guardarEvento(cam.nombre, cam.ip, 'recuperacion', 'camara', nvr.nombre);
-          await enviarAlerta(`CAMARA RECUPERADA\nNombre: ${cam.nombre}\nIP: ${cam.ip}\nNVR: ${nvr.nombre}\nFecha: ${fecha}`);
-          eventosPendientes.push({ tipo: 'recuperacion', tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre });
+          telegramRecuperados.push({ tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre, fecha });
+          const evento = { tipo: 'recuperacion', tipoDispositivo: 'camara', nombre: cam.nombre, ip: cam.ip, nvrNombre: nvr.nombre };
+          eventosPendientes.push(evento);
+          getIO()?.emit('evento', evento);
         }
 
         return { nombre: cam.nombre, ip: cam.ip, activo: camActiva, enCaida: camEst.enCaida };
@@ -138,6 +161,64 @@ export async function chequearTodo() {
   }));
 
   ultimoEstado = resultado;
+  getIO()?.emit('estado', resultado); // Empuja el estado a todos los navegadores conectados, al instante
+
+  // Avisar por Telegram: individual si son pocos, resumido si es un incidente masivo
+  await enviarGrupoTelegram(telegramCaidas,      'caida');
+  await enviarGrupoTelegram(telegramRecuperados, 'recuperacion');
+}
+
+// ── Decidir y enviar los avisos de Telegram de un grupo de eventos ───────────
+async function enviarGrupoTelegram(eventos, tipo) {
+  if (eventos.length === 0) return;
+
+  const nvrs    = eventos.filter(e => e.tipoDispositivo === 'nvr');
+  const camaras = eventos.filter(e => e.tipoDispositivo === 'camara');
+  const esMasivo = nvrs.length > UMBRAL_TELEGRAM_MASIVO || camaras.length > UMBRAL_TELEGRAM_MASIVO;
+
+  if (esMasivo) {
+    await enviarAlerta(formatearResumenMasivo(tipo, nvrs.length, camaras.length));
+    return;
+  }
+
+  // Pocos casos (o combinaciones chicas, ej: 1 NVR + 1 cámara): uno por uno,
+  // con el detalle completo, igual que antes.
+  for (const ev of eventos) {
+    await enviarAlerta(formatearEventoIndividual(ev, tipo));
+  }
+}
+
+// ── Mensaje resumido para incidentes masivos ─────────────────────────────────
+function formatearResumenMasivo(tipo, cantidadNVR, cantidadCamaras) {
+  const fecha      = new Date().toLocaleString('es-CO');
+  const esCaida    = tipo === 'caida';
+  const encabezado = esCaida ? 'INCIDENTE MASIVO DETECTADO' : 'RECUPERACION MASIVA';
+
+  const lineas = [];
+  if (cantidadNVR > 0) {
+    lineas.push(`${cantidadNVR} NVR(s) ${esCaida ? 'caído(s)' : 'recuperado(s)'}`);
+  }
+  if (cantidadCamaras > 0) {
+    lineas.push(`${cantidadCamaras} cámara(s) ${esCaida ? 'caída(s)' : 'recuperada(s)'}`);
+  }
+
+  let mensaje = `${encabezado}\n${lineas.join('\n')}\nFecha: ${fecha}`;
+  if (esCaida) mensaje += '\nRevisa el dashboard para el detalle completo.';
+  return mensaje;
+}
+
+// ── Mensaje individual, con el mismo formato de siempre ───────────────────────
+function formatearEventoIndividual(ev, tipo) {
+  const esNVR   = ev.tipoDispositivo === 'nvr';
+  const esCaida = tipo === 'caida';
+  const titulo  = esNVR
+    ? (esCaida ? 'NVR CAIDO'     : 'NVR RECUPERADO')
+    : (esCaida ? 'CAMARA CAIDA'  : 'CAMARA RECUPERADA');
+
+  let mensaje = `${titulo}\nNombre: ${ev.nombre}\nIP: ${ev.ip}`;
+  if (!esNVR) mensaje += `\nNVR: ${ev.nvrNombre}`;
+  mensaje += `\nFecha: ${ev.fecha}`;
+  return mensaje;
 }
 
 // ── Historial con filtros ─────────────────────────────────────────────────────
