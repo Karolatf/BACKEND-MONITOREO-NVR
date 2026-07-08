@@ -1,8 +1,16 @@
 // ── Script CLI para crear un administrador del área de redes ─────────────────
 // Uso: npm run crear-admin
 // Pide usuario, nombre y contraseña por consola, genera el hash bcrypt
-// y lo guarda en la tabla `usuarios`. La contraseña NUNCA se guarda en texto
-// plano ni queda en el historial de la terminal (se pide con readline oculto).
+// y lo guarda en la tabla `usuarios`.
+//
+// NOTA: la contraseña se pide de forma VISIBLE (no oculta con asteriscos).
+// Se intentó ocultarla con setRawMode, pero en Git Bash de Windows esa
+// técnica no es confiable: el Enter a veces llega como "\r\n" junto en un
+// solo bloque, y el código lo interpretaba como parte de la contraseña,
+// guardando un carácter invisible de más al final sin que se notara —
+// causando que el login fallara con "usuario o contraseña incorrectos"
+// aunque la contraseña escrita se viera idéntica en pantalla. Mejor
+// confiable y visible, que "oculta" y potencialmente corrupta.
 // ─────────────────────────────────────────────────────────────────────────────
 import 'dotenv/config';
 import readline      from 'readline';
@@ -12,38 +20,10 @@ import { hashPassword, buscarUsuarioPorUsername } from '../services/authService.
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 // ── Pregunta simple con readline convertida a Promise ─────────────────────────
+// trim() quita cualquier espacio, tabulación o salto de línea invisible que
+// se haya colado al copiar/pegar o al presionar Enter en distintas terminales.
 function preguntar(texto) {
   return new Promise(resolve => rl.question(texto, respuesta => resolve(respuesta.trim())));
-}
-
-// ── Pregunta con la entrada oculta (para la contraseña) ───────────────────────
-function preguntarOculto(texto) {
-  return new Promise(resolve => {
-    process.stdout.write(texto);
-    const stdin = process.stdin;
-    stdin.resume();
-    stdin.setRawMode(true);
-    let entrada = '';
-
-    const onData = char => {
-      char = char.toString('utf8');
-      if (char === '\n' || char === '\r' || char === '\u0004') {
-        stdin.setRawMode(false);
-        stdin.pause();
-        stdin.removeListener('data', onData);
-        process.stdout.write('\n');
-        resolve(entrada);
-      } else if (char === '\u0003') { // Ctrl+C
-        process.exit(1);
-      } else if (char === '\u007f') { // Backspace
-        entrada = entrada.slice(0, -1);
-      } else {
-        entrada += char;
-      }
-    };
-
-    stdin.on('data', onData);
-  });
 }
 
 async function main() {
@@ -60,28 +40,34 @@ async function main() {
   const nombre = await preguntar('Nombre completo: ');
   if (!nombre) { console.error('El nombre es obligatorio.'); process.exit(1); }
 
-  const password = await preguntarOculto('Contraseña (mínimo 8 caracteres): ');
+  console.log('\n(La contraseña se mostrará en pantalla mientras la escribes — asegúrate de que nadie más esté viendo.)');
+  const password = await preguntar('Contraseña (mínimo 8 caracteres): ');
   if (!password || password.length < 8) {
     console.error('La contraseña debe tener al menos 8 caracteres.');
     process.exit(1);
   }
 
-  const confirmacion = await preguntarOculto('Confirmar contraseña: ');
+  const confirmacion = await preguntar('Confirmar contraseña: ');
   if (password !== confirmacion) {
     console.error('Las contraseñas no coinciden.');
     process.exit(1);
   }
 
   const passwordHash = await hashPassword(password);
-  const { getPool }  = await import('../db/conexion.js');
 
+  await getPoolYGuardar(username, passwordHash, nombre);
+
+  console.log(`\nUsuario "${username}" creado correctamente.`);
+  console.log(`Contraseña guardada: "${password}" (${password.length} caracteres) — verifícala antes de cerrar esta ventana.`);
+  process.exit(0);
+}
+
+async function getPoolYGuardar(username, passwordHash, nombre) {
+  const { getPool } = await import('../db/conexion.js');
   await getPool().execute(
     'INSERT INTO usuarios (username, password_hash, nombre, rol) VALUES (?, ?, ?, ?)',
     [username, passwordHash, nombre, 'admin']
   );
-
-  console.log(`\nUsuario "${username}" creado correctamente.`);
-  process.exit(0);
 }
 
 main().catch(err => {

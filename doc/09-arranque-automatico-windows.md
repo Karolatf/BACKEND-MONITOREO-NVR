@@ -1,4 +1,4 @@
-# Ejecución automática del servidor — NVR Monitor HIC
+# 9. Arranque automático en Windows
 
 ## Problema que resuelve
 
