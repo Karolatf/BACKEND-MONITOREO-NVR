@@ -10,6 +10,8 @@ import { inicializarDB }                                          from './db/ini
 import { inicializarEstados, sincronizarEstadosDesdeDB, chequearTodo, getUltimoEstado } from './services/monitorService.js';
 import apiRoutes                                                  from './routes/api.routes.js';
 import authRoutes                                                 from './routes/auth.routes.js';
+import usuariosRoutes                                             from './routes/usuarios.routes.js';
+import perfilRoutes                                               from './routes/perfil.routes.js';
 import { setIO }                                                  from './services/socketService.js';
 import { verificarToken }                                         from './services/authService.js';
 
@@ -33,8 +35,10 @@ app.use((req, res, next) => {
 app.use(express.static(join(__dirname, '..', 'FRONTEND', 'public')));
 
 // ── Rutas de la API ───────────────────────────────────────────────────────────
-app.use('/api/auth', authRoutes); // Login: pública, sin JWT
-app.use('/api', apiRoutes);       // Status/historial: protegidas por JWT
+app.use('/api/auth',     authRoutes);     // Login/recuperación: públicas, sin JWT
+app.use('/api/usuarios', usuariosRoutes); // Gestión de usuarios: exclusiva superadmin
+app.use('/api/perfil',   perfilRoutes);   // Mi Perfil: cualquier usuario logueado
+app.use('/api',          apiRoutes);      // Status/historial: protegidas por JWT
 
 // ── Servidor HTTP + WebSockets (tiempo real) ──────────────────────────────────
 // Se envuelve la app de Express en un servidor http nativo porque Socket.IO

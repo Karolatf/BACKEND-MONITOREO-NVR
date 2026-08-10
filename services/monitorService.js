@@ -1,4 +1,5 @@
 // ── Servicio de monitoreo de NVRs y cámaras ──────────────────────────────────
+import net from 'net';
 import { fisica, paciente, cx, ucis } from '../config/dispositivos.js';
 import { getPool }                    from '../db/conexion.js';
 import { enviarAlerta, reintentarPendientes } from './telegramService.js';
@@ -125,6 +126,53 @@ async function verificarConPorcentaje(ip) {
   ]);
   const exitos = intentos.filter(Boolean).length;
   return exitos;
+}
+
+// ── Capa 2: confirmar que el SERVICIO DE VIDEO responde, no solo la red ──────
+// El chequeo de arriba (HTTP a la interfaz web) puede decir "vivo" aunque el
+// video esté colgado — la interfaz web y el servicio de video son procesos
+// distintos dentro del mismo equipo, y uno puede caerse sin el otro.
+//
+// Este chequeo abre una conexión TCP directa a los puertos reales de video:
+// 554 (RTSP, estándar en cualquier cámara/NVR IP sin importar la marca),
+// 8000 (gestión Hikvision) y 37777 (gestión Dahua). No hace falta saber la
+// marca de cada equipo — se prueban los tres en paralelo y basta con que
+// uno responda.
+//
+// Se ejecuta UNA sola vez por dispositivo por ciclo (no 3 veces, como el
+// chequeo HTTP): es una capa de confirmación, no de medición de porcentaje,
+// y así se evita triplicar la cantidad de conexiones de red abiertas por
+// ciclo — justo el tipo de saturación que ya causó problemas antes.
+const PUERTOS_VIDEO = [554, 8000, 37777];
+
+function verificarPuertoTCP(ip, puerto, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    let resuelto = false;
+
+    const finalizar = (fn, valor) => {
+      if (resuelto) return;
+      resuelto = true;
+      socket.destroy();
+      fn(valor);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finalizar(resolve, true));
+    socket.once('timeout', () => finalizar(reject, new Error('timeout')));
+    socket.once('error',   () => finalizar(reject, new Error('error')));
+
+    socket.connect(puerto, ip);
+  });
+}
+
+async function verificarServicioVideo(ip) {
+  try {
+    await Promise.any(PUERTOS_VIDEO.map(puerto => verificarPuertoTCP(ip, puerto)));
+    return true;
+  } catch {
+    return false; // Promise.any solo lanza si LOS TRES puertos fallaron
+  }
 }
 
 // ── Ejecutar tareas con un límite de concurrencia ─────────────────────────────
@@ -258,9 +306,20 @@ export async function chequearTodo() {
     }
 
     const resultadosCrudos = await conLimiteConcurrencia(tareas, LIMITE_CONCURRENCIA, async tarea => {
-      const ip     = tarea.tipo === 'nvr' ? tarea.nvr.ip : tarea.cam.ip;
-      const exitos = await verificarConPorcentaje(ip);
-      return { ...tarea, exitos };
+      const ip         = tarea.tipo === 'nvr' ? tarea.nvr.ip : tarea.cam.ip;
+      const exitosHTTP = await verificarConPorcentaje(ip);
+
+      // Capa 2: si la red ya respondió, confirmar que el servicio de video
+      // también. Si la red ya estaba completamente caída (exitosHTTP === 0),
+      // no tiene caso gastar otra conexión — ya se sabe que está caído.
+      if (exitosHTTP === 0) {
+        return { ...tarea, exitos: 0 };
+      }
+      const videoActivo = await verificarServicioVideo(ip);
+      // Red viva pero video colgado: se trata como caída real, no como
+      // "normal" ni "degradado" — el propósito del sistema es la cobertura
+      // de video, no que responda una página web.
+      return { ...tarea, exitos: videoActivo ? exitosHTTP : 0 };
     });
 
     // Reagrupar en la misma estructura por zona → NVR → cámaras, para procesar

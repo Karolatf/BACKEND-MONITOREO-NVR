@@ -29,7 +29,9 @@ function preguntar(texto) {
 async function main() {
   await crearPool();
 
-  console.log('── Crear administrador — NVR Monitor HIC ──\n');
+  console.log('── Crear súper administrador — NVR Monitor HIC ──');
+  console.log('(Este script SOLO se usa para crear al único súper administrador del sistema.');
+  console.log(' Los usuarios "analista" y "visualizacion" se crean desde la web, en Gestión de Usuarios.)\n');
 
   const username = (await preguntar('Usuario (ej: gerson.paez): ')).toLowerCase();
   if (!username) { console.error('El usuario es obligatorio.'); process.exit(1); }
@@ -66,7 +68,7 @@ async function getPoolYGuardar(username, passwordHash, nombre) {
   const { getPool } = await import('../db/conexion.js');
   await getPool().execute(
     'INSERT INTO usuarios (username, password_hash, nombre, rol) VALUES (?, ?, ?, ?)',
-    [username, passwordHash, nombre, 'admin']
+    [username, passwordHash, nombre, 'superadmin']
   );
 }
 
