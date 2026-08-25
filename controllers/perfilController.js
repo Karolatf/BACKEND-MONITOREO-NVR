@@ -10,7 +10,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export async function getPerfil(req, res) {
   try {
     const [rows] = await getPool().query(
-      'SELECT username, nombre, rol, email_personal FROM usuarios WHERE id = ?',
+      'SELECT username, nombre, rol, email_personal, permisos FROM usuarios WHERE id = ?',
       [req.usuario.id]
     );
     res.json(rows[0] || {});

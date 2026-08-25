@@ -4,19 +4,22 @@ import {
   postLogin,
   postRefresh,
   postSolicitarRecuperacion,
-  postRestablecerPassword
+  postRestablecerPassword,
+  getHistorialLogin
 } from '../controllers/authController.js';
-import { verificarBloqueo }  from '../middleware/rateLimitLogin.js';
+import { verificarBloqueo, verificarBloqueoRecuperacion } from '../middleware/rateLimitLogin.js';
 import { requiereAuth }      from '../middleware/authMiddleware.js';
+import { requiereSuperAdmin } from '../middleware/permisos.js';
 
 const router = Router();
 
 router.post('/login',   verificarBloqueo, postLogin);
-router.post('/refresh', requiereAuth,     postRefresh); // Sesión deslizante
+router.post('/refresh', requiereAuth,     postRefresh);
 
-// Recuperación de contraseña por correo — mismo límite anti fuerza bruta que
-// el login, para que nadie pueda usarlo para reventar códigos por prueba y error
-router.post('/recuperar/solicitar',   verificarBloqueo, postSolicitarRecuperacion);
-router.post('/recuperar/restablecer', verificarBloqueo, postRestablecerPassword);
+router.post('/recuperar/solicitar',   verificarBloqueoRecuperacion, postSolicitarRecuperacion);
+router.post('/recuperar/restablecer', verificarBloqueoRecuperacion, postRestablecerPassword);
+
+// Historial de "quién entró, desde dónde y cuándo" — solo lo ve el súper admin
+router.get('/historial-login', requiereAuth, requiereSuperAdmin, getHistorialLogin);
 
 export default router;

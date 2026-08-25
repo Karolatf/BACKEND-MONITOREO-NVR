@@ -49,7 +49,7 @@ export async function exportarHistorial(req, res) {
     const fechaArchivo = new Date().toISOString().slice(0, 10);
 
     if (formato === 'excel') {
-      const buffer = await generarExcelHistorial(eventos);
+      const buffer = await generarExcelHistorial(eventos, descripcionFiltros);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="historial-nvr-${fechaArchivo}.xlsx"`);
       res.send(buffer);

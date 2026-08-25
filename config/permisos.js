@@ -20,9 +20,14 @@ export const PERMISOS_DISPONIBLES = [
     descripcion: 'Agregar, editar y eliminar NVRs y cámaras desde la web'
   },
   {
-    clave: 'gestionar_configuracion',
-    nombre: 'Gestionar configuración',
-    descripcion: 'Ajustar horario laboral, umbrales de alerta y sensibilidad del monitoreo'
+    clave: 'gestionar_horario_laboral',
+    nombre: 'Gestionar horario laboral',
+    descripcion: 'Ajustar qué días y horas se consideran horario laboral para las alertas'
+  },
+  {
+    clave: 'gestionar_umbrales_alerta',
+    nombre: 'Gestionar umbrales de alerta',
+    descripcion: 'Ajustar la sensibilidad y los tiempos de espera del monitoreo'
   },
   {
     clave: 'exportar_reportes',

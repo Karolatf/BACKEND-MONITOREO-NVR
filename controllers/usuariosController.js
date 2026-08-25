@@ -4,7 +4,8 @@ import {
   crearUsuario,
   actualizarUsuario,
   cambiarPasswordAdmin,
-  eliminarUsuario
+  cambiarEstadoUsuario,
+  eliminarUsuarioDefinitivamente
 } from '../services/usuariosService.js';
 
 // ── GET /api/usuarios ─────────────────────────────────────────────────────────
@@ -48,10 +49,20 @@ export async function putPasswordUsuario(req, res) {
   }
 }
 
-// ── DELETE /api/usuarios/:id (desactivar, no se borra el registro) ───────────
+// ── PUT /api/usuarios/:id/estado — activar o desactivar (reversible) ─────────
+export async function putEstadoUsuario(req, res) {
+  try {
+    await cambiarEstadoUsuario(req.params.id, !!req.body.activo);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}
+
+// ── DELETE /api/usuarios/:id — elimina el registro por completo ──────────────
 export async function deleteUsuario(req, res) {
   try {
-    await eliminarUsuario(req.params.id);
+    await eliminarUsuarioDefinitivamente(req.params.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });

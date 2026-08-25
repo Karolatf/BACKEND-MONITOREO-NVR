@@ -1,6 +1,6 @@
 // ── Controlador de autenticación ──────────────────────────────────────────────
-import { login, refrescarToken, solicitarRecuperacion, restablecerPassword } from '../services/authService.js';
-import { registrarFallo, limpiarIntentos } from '../middleware/rateLimitLogin.js';
+import { login, refrescarToken, solicitarRecuperacion, restablecerPassword, obtenerHistorialLogin } from '../services/authService.js';
+import { registrarFallo, limpiarIntentos, registrarFalloRecuperacion, limpiarIntentosRecuperacion } from '../middleware/rateLimitLogin.js';
 
 // ── POST /api/auth/login ──────────────────────────────────────────────────────
 export async function postLogin(req, res) {
@@ -10,16 +10,32 @@ export async function postLogin(req, res) {
     return res.status(400).json({ error: 'Usuario y contraseña son obligatorios.' });
   }
 
-  try {
-    const resultado = await login(username.trim().toLowerCase(), password);
+  // Misma forma de obtener la IP que ya usa el limitador de intentos
+  // (middleware/rateLimitLogin.js), para que sea consistente en todo el sistema.
+  // Node reporta las IPv4 en formato "IPv4-mapped IPv6" (::ffff:127.0.0.1)
+  // cuando el servidor escucha en modo dual-stack — es normal y es la IP
+  // correcta, pero se ve más claro en el historial sin ese prefijo.
+  const ip = limpiarIP(req.ip || req.socket?.remoteAddress || 'desconocida');
 
-    if (!resultado) {
+  try {
+    const resultado = await login(username.trim().toLowerCase(), password, ip);
+
+    if (!resultado.ok) {
+      // Cuenta inactiva: la contraseña SÍ era correcta, así que no cuenta
+      // como intento fallido (no hay nada que bloquear aquí) y se le explica
+      // a la persona qué pasa, en vez del genérico "usuario o contraseña".
+      if (resultado.motivo === 'inactivo') {
+        return res.status(403).json({
+          error: 'Tu cuenta está inactiva. Comunícate con el superadministrador para más información.'
+        });
+      }
+
       registrarFallo(req);
       return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
     }
 
     limpiarIntentos(req);
-    res.json(resultado); // { token, usuario }
+    res.json({ token: resultado.token, usuario: resultado.usuario });
   } catch (err) {
     console.error('Error en login:', err.message);
     res.status(500).json({ error: 'Error interno al iniciar sesión.' });
@@ -36,8 +52,6 @@ export function postRefresh(req, res) {
 }
 
 // ── POST /api/auth/recuperar/solicitar ────────────────────────────────────────
-// Respuesta SIEMPRE genérica (exista o no el usuario, tenga o no correo
-// registrado) para no revelar qué cuentas existen en el sistema.
 export async function postSolicitarRecuperacion(req, res) {
   const { username } = req.body;
 
@@ -46,16 +60,21 @@ export async function postSolicitarRecuperacion(req, res) {
   }
 
   try {
-    await solicitarRecuperacion(username.trim().toLowerCase());
+    const resultado = await solicitarRecuperacion(username.trim().toLowerCase());
+
+    if (!resultado.ok) {
+      const mensaje = resultado.motivo === 'sin_usuario'
+        ? 'No existe ningún usuario con ese nombre.'
+        : 'Este usuario no tiene un correo personal registrado. Debe registrarlo desde "Mi Perfil" antes de poder recuperar/cambiar la contraseña';
+      return res.status(400).json({ error: mensaje });
+    }
+
+    res.json({ ok: true, mensaje: 'Se envió un código a tu correo registrado.' });
+
   } catch (err) {
     console.error('Error al solicitar recuperación:', err.message);
-    // No se filtra el error al cliente: seguiría siendo un mensaje genérico
+    res.status(500).json({ error: 'No se pudo procesar la solicitud. Intenta de nuevo.' });
   }
-
-  res.json({
-    ok: true,
-    mensaje: 'Si el usuario existe y tiene un correo registrado, se envió un código a ese correo.'
-  });
 }
 
 // ── POST /api/auth/recuperar/restablecer ──────────────────────────────────────
@@ -65,20 +84,37 @@ export async function postRestablecerPassword(req, res) {
   if (!username || !codigo || !nuevaPassword) {
     return res.status(400).json({ error: 'Todos los campos son obligatorios.' });
   }
-  if (nuevaPassword.length < 8) {
-    return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
-  }
 
   try {
     const ok = await restablecerPassword(username.trim().toLowerCase(), codigo.trim(), nuevaPassword);
     if (!ok) {
-      registrarFallo(req);
+      registrarFalloRecuperacion(req);
       return res.status(400).json({ error: 'Código inválido o expirado.' });
     }
-    limpiarIntentos(req);
+    limpiarIntentosRecuperacion(req);
     res.json({ ok: true });
   } catch (err) {
+    // Errores de validación de contraseña (fortaleza) sí se muestran tal cual —
+    // no revelan nada sensible, solo ayudan a corregir la contraseña
     console.error('Error al restablecer contraseña:', err.message);
-    res.status(500).json({ error: 'No se pudo restablecer la contraseña.' });
+    res.status(400).json({ error: err.message || 'No se pudo restablecer la contraseña.' });
+  }
+}
+
+// ── Quitar el prefijo IPv4-mapeado (::ffff:) de una IP, si lo tiene ──────────
+function limpiarIP(ip) {
+  return ip && ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
+// ── GET /api/auth/historial-login ─────────────────────────────────────────────
+// Exclusivo del súper administrador (ver auth.routes.js). Se usa en la
+// tarjeta "Historial de Inicios de Sesión" de "Mi Perfil".
+export async function getHistorialLogin(req, res) {
+  try {
+    const historial = await obtenerHistorialLogin(50);
+    res.json({ historial });
+  } catch (err) {
+    console.error('Error al obtener el historial de login:', err.message);
+    res.status(500).json({ error: 'No se pudo cargar el historial de inicios de sesión.' });
   }
 }
